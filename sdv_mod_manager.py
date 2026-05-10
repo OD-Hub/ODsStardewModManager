@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Stardew Valley Mod Manager for Linux (KDE/Kubuntu)
-Manages SMAPI mods — enable/disable, profiles, launch game.
+OD's Stardew Mod Manager — v1.0
+Cross-platform SMAPI mod manager for Stardew Valley.
+Supports Linux, macOS, and Windows.
 """
 
 import sys
@@ -10,6 +11,7 @@ import json
 import shutil
 import subprocess
 import math
+import platform
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -25,32 +27,85 @@ from PyQt6.QtGui import (
 )
 
 
+# ─── Platform Detection ───────────────────────────────────────────────────────
+
+PLATFORM = platform.system()   # "Linux", "Darwin", "Windows"
+IS_LINUX   = PLATFORM == "Linux"
+IS_MAC     = PLATFORM == "Darwin"
+IS_WINDOWS = PLATFORM == "Windows"
+
+
 # ─── Constants ────────────────────────────────────────────────────────────────
 
 APP_NAME     = "OD's Stardew Mod Manager"
-APP_VERSION  = 1.0
-SETTINGS_ORG = "sdv-mod-manager"
-SETTINGS_APP = "sdv-mod-manager"
-
-DEFAULT_MOD_PATHS = [
-    Path.home() / "snap/steam/common/.local/share/Steam/steamapps/common/Stardew Valley/Mods",
-    Path.home() / ".local/share/Steam/steamapps/common/Stardew Valley/Mods",
-    Path.home() / ".steam/steam/steamapps/common/Stardew Valley/Mods",
-    Path.home() / "GOG Games/Stardew Valley/Mods",
-]
-
-DEFAULT_SMAPI_PATHS = [
-    Path.home() / "snap/steam/common/.local/share/Steam/steamapps/common/Stardew Valley/StardewModdingAPI",
-    Path.home() / ".local/share/Steam/steamapps/common/Stardew Valley/StardewModdingAPI",
-    Path.home() / ".steam/steam/steamapps/common/Stardew Valley/StardewModdingAPI",
-]
-
-DISABLED_PREFIX  = "."
-PROFILES_FILE    = Path.home() / ".config" / "sdv-mod-manager" / "profiles.json"
+APP_VERSION  = "1.0"
+SETTINGS_ORG = "ODsStardewModManager"
+SETTINGS_APP = "ODsStardewModManager"
 SDV_STEAM_APP_ID = "413150"
 
+# Folder prefix used to disable mods (SMAPI skips dot-prefixed folders on all OS)
+DISABLED_PREFIX = "."
 
-# ─── Palette ──────────────────────────────────────────────────────────────────
+# ── Script location — used to find icon.png sitting next to the script/exe ────
+# Works whether running as a .py file or a PyInstaller bundle
+if getattr(sys, "frozen", False):
+    # Running as a PyInstaller executable
+    APP_DIR = Path(sys.executable).parent
+else:
+    # Running as a plain .py script
+    APP_DIR = Path(__file__).resolve().parent
+
+ICON_PATH = APP_DIR / "icon.png"
+
+# ── Per-platform config & data paths ─────────────────────────────────────────
+if IS_WINDOWS:
+    _cfg = Path(os.environ.get("APPDATA", Path.home() / "AppData/Roaming"))
+    CONFIG_DIR = _cfg / "ODsStardewModManager"
+elif IS_MAC:
+    CONFIG_DIR = Path.home() / "Library/Application Support/ODsStardewModManager"
+else:  # Linux
+    CONFIG_DIR = Path.home() / ".config" / "ODsStardewModManager"
+
+PROFILES_FILE = CONFIG_DIR / "profiles.json"
+SETTINGS_FILE = CONFIG_DIR / "settings.json"
+
+# ── Default Mods folder locations ─────────────────────────────────────────────
+if IS_WINDOWS:
+    _pf   = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)"))
+    _pf64 = Path(os.environ.get("ProgramFiles",      "C:/Program Files"))
+    DEFAULT_MOD_PATHS = [
+        _pf   / "Steam/steamapps/common/Stardew Valley/Mods",
+        _pf64 / "Steam/steamapps/common/Stardew Valley/Mods",
+        Path.home() / "AppData/Local/Programs/Stardew Valley/Mods",
+        Path("C:/GOG Games/Stardew Valley/Mods"),
+    ]
+    DEFAULT_SMAPI_PATHS = [
+        _pf   / "Steam/steamapps/common/Stardew Valley/StardewModdingAPI.exe",
+        _pf64 / "Steam/steamapps/common/Stardew Valley/StardewModdingAPI.exe",
+    ]
+elif IS_MAC:
+    DEFAULT_MOD_PATHS = [
+        Path.home() / "Library/Application Support/Steam/steamapps/common/Stardew Valley/Contents/MacOS/Mods",
+        Path("/Applications/Stardew Valley.app/Contents/MacOS/Mods"),
+    ]
+    DEFAULT_SMAPI_PATHS = [
+        Path.home() / "Library/Application Support/Steam/steamapps/common/Stardew Valley/Contents/MacOS/StardewModdingAPI",
+    ]
+else:  # Linux
+    DEFAULT_MOD_PATHS = [
+        Path.home() / "snap/steam/common/.local/share/Steam/steamapps/common/Stardew Valley/Mods",
+        Path.home() / ".local/share/Steam/steamapps/common/Stardew Valley/Mods",
+        Path.home() / ".steam/steam/steamapps/common/Stardew Valley/Mods",
+        Path.home() / "GOG Games/Stardew Valley/Mods",
+    ]
+    DEFAULT_SMAPI_PATHS = [
+        Path.home() / "snap/steam/common/.local/share/Steam/steamapps/common/Stardew Valley/StardewModdingAPI",
+        Path.home() / ".local/share/Steam/steamapps/common/Stardew Valley/StardewModdingAPI",
+        Path.home() / ".steam/steam/steamapps/common/Stardew Valley/StardewModdingAPI",
+    ]
+
+
+# ─── Colour Palette ───────────────────────────────────────────────────────────
 
 P = {
     "bg":          "#1a1c23",
@@ -68,86 +123,69 @@ P = {
 }
 
 
-# ─── Custom App Icon (drawn in code, no image file needed) ────────────────────
-
-ICON_PATH = Path.home() / ".local/share/sdv-mod-manager/icon.png"
-
+# ─── App Icon ─────────────────────────────────────────────────────────────────
 
 def make_icon() -> QIcon:
-    # Use custom icon.png if it exists
+    """Load icon.png if present, otherwise draw a fallback icon in code."""
     if ICON_PATH.exists():
         return QIcon(str(ICON_PATH))
-    # Otherwise fall back to the drawn icon
+
     icon = QIcon()
     for size in [16, 32, 48, 64, 128, 256]:
         px = QPixmap(size, size)
         px.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(px)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        s = size
-        m = max(1, s // 16)
+        p = QPainter(px)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        s, m = size, max(1, size // 16)
 
-        # Background circle — dark green gradient
+        # Background circle
         grad = QRadialGradient(s * 0.5, s * 0.42, s * 0.5)
         grad.setColorAt(0.0, QColor("#2d5a3d"))
         grad.setColorAt(1.0, QColor("#1a3326"))
-        painter.setBrush(QBrush(grad))
-        painter.setPen(QPen(QColor("#4a8a5a"), m))
-        painter.drawEllipse(m, m, s - 2 * m, s - 2 * m)
+        p.setBrush(QBrush(grad))
+        p.setPen(QPen(QColor("#4a8a5a"), m))
+        p.drawEllipse(m, m, s - 2 * m, s - 2 * m)
 
         # Stem
-        stem_w = max(2, s // 20)
-        painter.setPen(QPen(QColor("#5a9a4a"), stem_w,
-                            Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        painter.drawLine(int(s * 0.50), int(s * 0.58),
-                         int(s * 0.50), int(s * 0.82))
+        sw = max(2, s // 20)
+        p.setPen(QPen(QColor("#5a9a4a"), sw, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(int(s * 0.50), int(s * 0.58), int(s * 0.50), int(s * 0.82))
 
         # Leaves
-        painter.setBrush(QBrush(QColor("#7eb87e")))
-        painter.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor("#7eb87e")))
+        p.setPen(Qt.PenStyle.NoPen)
 
-        def draw_leaf(cx, cy, w, h, angle):
+        def leaf(cx, cy, w, h, angle):
             path = QPainterPath()
             path.moveTo(0, 0)
             path.cubicTo(-w * 0.6, -h * 0.3, -w * 0.4, -h * 0.9, 0, -h)
             path.cubicTo( w * 0.4, -h * 0.9,  w * 0.6, -h * 0.3, 0,  0)
-            painter.save()
-            painter.translate(cx, cy)
-            painter.rotate(angle)
-            painter.drawPath(path)
-            painter.restore()
+            p.save(); p.translate(cx, cy); p.rotate(angle)
+            p.drawPath(path); p.restore()
 
         lw, lh = s * 0.22, s * 0.28
-        draw_leaf(s * 0.50, s * 0.60,  lw,       lh,        0)
-        draw_leaf(s * 0.50, s * 0.65,  lw * 0.85, lh * 0.75,  35)
-        draw_leaf(s * 0.50, s * 0.65,  lw * 0.85, lh * 0.75, -35)
+        leaf(s * 0.50, s * 0.60, lw,        lh,         0)
+        leaf(s * 0.50, s * 0.65, lw * 0.85, lh * 0.75,  35)
+        leaf(s * 0.50, s * 0.65, lw * 0.85, lh * 0.75, -35)
 
         # Gold star
-        r_out  = s * 0.18
-        r_in   = s * 0.08
-        scx    = s * 0.50
-        scy    = s * 0.36
-        star   = QPainterPath()
+        ro, ri = s * 0.18, s * 0.08
+        scx, scy = s * 0.50, s * 0.36
+        star = QPainterPath()
         for i in range(10):
-            r     = r_out if i % 2 == 0 else r_in
-            angle = math.radians(i * 36 - 90)
-            x     = scx + r * math.cos(angle)
-            y     = scy + r * math.sin(angle)
-            if i == 0:
-                star.moveTo(x, y)
-            else:
-                star.lineTo(x, y)
+            r = ro if i % 2 == 0 else ri
+            a = math.radians(i * 36 - 90)
+            x, y = scx + r * math.cos(a), scy + r * math.sin(a)
+            star.moveTo(x, y) if i == 0 else star.lineTo(x, y)
         star.closeSubpath()
-
-        sg = QRadialGradient(scx, scy - r_out * 0.3, r_out)
+        sg = QRadialGradient(scx, scy - ro * 0.3, ro)
         sg.setColorAt(0.0, QColor("#fffbe6"))
         sg.setColorAt(0.5, QColor("#e8c96b"))
         sg.setColorAt(1.0, QColor("#c8922b"))
-        painter.setBrush(QBrush(sg))
-        painter.setPen(QPen(QColor("#a06820"), max(1, s // 48)))
-        painter.drawPath(star)
-
-        painter.end()
+        p.setBrush(QBrush(sg))
+        p.setPen(QPen(QColor("#a06820"), max(1, s // 48)))
+        p.drawPath(star)
+        p.end()
         icon.addPixmap(px)
     return icon
 
@@ -191,40 +229,77 @@ def get_mods(mods_dir: Path) -> list[dict]:
 
 
 def mod_id(mod: dict) -> str:
-    """Stable identifier — prefer UniqueID, fall back to base folder name."""
     return mod["unique_id"] or mod["folder_name"].lstrip(".")
 
 
 def find_steam_executable() -> str | None:
-    for c in ["/usr/bin/steam", "/usr/local/bin/steam", shutil.which("steam")]:
-        if c and Path(c).exists():
-            return c
+    """Locate the Steam binary on any platform."""
+    if IS_WINDOWS:
+        candidates = [
+            Path(os.environ.get("ProgramFiles(x86)", "")) / "Steam/steam.exe",
+            Path(os.environ.get("ProgramFiles",      "")) / "Steam/steam.exe",
+        ]
+    elif IS_MAC:
+        candidates = [
+            Path("/Applications/Steam.app/Contents/MacOS/steam_osx"),
+            Path.home() / "Applications/Steam.app/Contents/MacOS/steam_osx",
+        ]
+    else:
+        candidates = [
+            Path("/usr/bin/steam"),
+            Path("/usr/local/bin/steam"),
+        ]
+        found = shutil.which("steam")
+        if found:
+            candidates.append(Path(found))
+
+    for c in candidates:
+        if c and c.exists():
+            return str(c)
     return None
+
+
+def launch_via_steam() -> subprocess.Popen | None:
+    """Launch Stardew Valley through Steam using its protocol URL."""
+    steam = find_steam_executable()
+    if not steam:
+        return None
+    url = f"steam://rungameid/{SDV_STEAM_APP_ID}"
+    if IS_WINDOWS:
+        return subprocess.Popen(["cmd", "/c", "start", url], shell=False)
+    elif IS_MAC:
+        return subprocess.Popen(["open", url])
+    else:
+        return subprocess.Popen([steam, url])
 
 
 # ─── Profile Manager ──────────────────────────────────────────────────────────
 
 class ProfileManager:
     """
-    Saves/loads mod profiles to ~/.config/sdv-mod-manager/profiles.json.
-    Each profile stores the list of mod IDs that should be ENABLED.
+    Profiles are saved to:
+      Linux:   ~/.config/ODsStardewModManager/profiles.json
+      macOS:   ~/Library/Application Support/ODsStardewModManager/profiles.json
+      Windows: %APPDATA%/ODsStardewModManager/profiles.json
+
+    Each profile stores the list of mod UniqueIDs that should be ENABLED.
     """
 
     def __init__(self):
-        PROFILES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         self._data: dict = {"profiles": {}, "active": None}
         self._load()
 
     def _load(self):
         if PROFILES_FILE.exists():
             try:
-                with open(PROFILES_FILE) as f:
+                with open(PROFILES_FILE, encoding="utf-8") as f:
                     self._data = json.load(f)
             except Exception:
                 pass
 
     def _save(self):
-        with open(PROFILES_FILE, "w") as f:
+        with open(PROFILES_FILE, "w", encoding="utf-8") as f:
             json.dump(self._data, f, indent=2)
 
     def names(self) -> list[str]:
@@ -264,30 +339,27 @@ class LaunchThread(QThread):
     finished = pyqtSignal(str)
     error    = pyqtSignal(str)
 
-    def __init__(self, smapi_path: str, use_steam: bool = True):
+    def __init__(self, smapi_path: str):
         super().__init__()
         self.smapi_path = smapi_path
-        self.use_steam  = use_steam
 
     def run(self):
         try:
-            if self.use_steam:
-                steam = find_steam_executable()
-                if steam:
-                    result = subprocess.Popen(
-                        [steam, f"steam://rungameid/{SDV_STEAM_APP_ID}"]
-                    )
-                    self.finished.emit(f"Launched via Steam (PID {result.pid})")
-                    return
+            proc = launch_via_steam()
+            if proc:
+                self.finished.emit(f"Launched via Steam (PID {proc.pid})")
+                return
+            # Fall back to launching SMAPI directly
             result = subprocess.Popen(
-                [self.smapi_path], cwd=str(Path(self.smapi_path).parent)
+                [self.smapi_path],
+                cwd=str(Path(self.smapi_path).parent)
             )
             self.finished.emit(f"Launched directly (PID {result.pid})")
         except Exception as e:
             self.error.emit(str(e))
 
 
-# ─── Mod Card Widget ──────────────────────────────────────────────────────────
+# ─── Mod Card ─────────────────────────────────────────────────────────────────
 
 class ModCard(QWidget):
     toggle_requested = pyqtSignal(dict, bool)
@@ -322,7 +394,6 @@ class ModCard(QWidget):
         self.name_label.setFont(QFont("monospace", 10, QFont.Weight.Bold))
         name_row.addWidget(self.name_label)
         name_row.addStretch()
-
         self.ver_label = QLabel(f"v{self.mod['version']}")
         self.ver_label.setFont(QFont("monospace", 9))
         self.ver_label.setStyleSheet(f"color:{P['text_dim']};")
@@ -379,12 +450,7 @@ class ModCard(QWidget):
 # ─── Profiles Panel ───────────────────────────────────────────────────────────
 
 class ProfilesPanel(QWidget):
-    """
-    Signals:
-      profile_applied(name)              — apply an existing profile
-      profile_applied("__save__:name")   — save current state as profile
-    """
-    profile_applied = pyqtSignal(str)
+    profile_applied = pyqtSignal(str)  # name, or "__save__:name"
 
     def __init__(self, profiles: ProfileManager, parent=None):
         super().__init__(parent)
@@ -533,6 +599,211 @@ class ProfilesPanel(QWidget):
         self._rebuild()
 
 
+
+# ─── First Launch Setup Dialog ────────────────────────────────────────────────
+
+class FirstLaunchDialog(QDialog):
+    """
+    Shown on first launch (when no paths are saved in settings).
+    Guides the user to set their Mods directory and SMAPI executable.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.mods_dir   = ""
+        self.smapi_path = ""
+        self._build()
+
+    def _build(self):
+        self.setWindowTitle(f"Welcome to {APP_NAME}")
+        self.setWindowIcon(make_icon())
+        self.setMinimumWidth(580)
+        self.setModal(True)
+
+        vl = QVBoxLayout(self)
+        vl.setSpacing(16)
+        vl.setContentsMargins(24, 24, 24, 24)
+
+        # Header
+        icon_lbl = QLabel()
+        icon_lbl.setPixmap(make_icon().pixmap(48, 48))
+        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        vl.addWidget(icon_lbl)
+
+        title = QLabel(f"Welcome to {APP_NAME}!")
+        title.setFont(QFont("monospace", 14, QFont.Weight.Bold))
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet(f"color:{P['accent']};")
+        vl.addWidget(title)
+
+        subtitle = QLabel(
+            "Before you get started, please tell the app where your\n"
+            "Stardew Valley Mods folder and SMAPI executable are located."
+        )
+        subtitle.setFont(QFont("monospace", 9))
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setStyleSheet(f"color:{P['text_dim']};")
+        vl.addWidget(subtitle)
+
+        # Divider
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setStyleSheet(f"color:{P['border']};")
+        vl.addWidget(line)
+
+        field_style = (
+            f"background:{P['surface2']}; border:1px solid {P['border']};"
+            f"border-radius:4px; color:{P['text']}; padding:4px 8px; font-size:11px;"
+        )
+        btn_style = (
+            f"QPushButton {{ background:{P['surface2']}; color:{P['text']};"
+            f"border:1px solid {P['border']}; border-radius:4px; padding:4px 14px; font-size:11px; }}"
+            f"QPushButton:hover {{ border-color:{P['accent']}; color:{P['accent']}; }}"
+        )
+
+        # Mods directory
+        mods_lbl = QLabel("📁  Mods Directory")
+        mods_lbl.setFont(QFont("monospace", 10, QFont.Weight.Bold))
+        mods_lbl.setStyleSheet(f"color:{P['accent2']};")
+        vl.addWidget(mods_lbl)
+
+        mods_hint = QLabel(
+            "The \'Mods\' folder inside your Stardew Valley installation.\n"
+            "SMAPI tells you this path in its log: [SMAPI] Mods go here: ..."
+        )
+        mods_hint.setFont(QFont("monospace", 8))
+        mods_hint.setStyleSheet(f"color:{P['text_dim']};")
+        vl.addWidget(mods_hint)
+
+        mods_row = QHBoxLayout()
+        self.mods_edit = QLineEdit()
+        self.mods_edit.setPlaceholderText("Click Browse to select your Mods folder…")
+        self.mods_edit.setStyleSheet(field_style)
+        self.mods_edit.textChanged.connect(self._validate)
+        mods_row.addWidget(self.mods_edit, 1)
+        mods_btn = QPushButton("Browse…")
+        mods_btn.setStyleSheet(btn_style)
+        mods_btn.clicked.connect(self._browse_mods)
+        mods_row.addWidget(mods_btn)
+        vl.addLayout(mods_row)
+
+        self.mods_status = QLabel("")
+        self.mods_status.setFont(QFont("monospace", 8))
+        vl.addWidget(self.mods_status)
+
+        # SMAPI executable
+        smapi_lbl = QLabel("⚙️  SMAPI Executable")
+        smapi_lbl.setFont(QFont("monospace", 10, QFont.Weight.Bold))
+        smapi_lbl.setStyleSheet(f"color:{P['accent2']};")
+        vl.addWidget(smapi_lbl)
+
+        smapi_hint = QLabel(
+            "The StardewModdingAPI file inside your Stardew Valley folder.\n"
+            "On Windows this is StardewModdingAPI.exe"
+        )
+        smapi_hint.setFont(QFont("monospace", 8))
+        smapi_hint.setStyleSheet(f"color:{P['text_dim']};")
+        vl.addWidget(smapi_hint)
+
+        smapi_row = QHBoxLayout()
+        self.smapi_edit = QLineEdit()
+        self.smapi_edit.setPlaceholderText("Click Browse to select StardewModdingAPI…")
+        self.smapi_edit.setStyleSheet(field_style)
+        self.smapi_edit.textChanged.connect(self._validate)
+        smapi_row.addWidget(self.smapi_edit, 1)
+        smapi_btn = QPushButton("Browse…")
+        smapi_btn.setStyleSheet(btn_style)
+        smapi_btn.clicked.connect(self._browse_smapi)
+        smapi_row.addWidget(smapi_btn)
+        vl.addLayout(smapi_row)
+
+        self.smapi_status = QLabel("")
+        self.smapi_status.setFont(QFont("monospace", 8))
+        vl.addWidget(self.smapi_status)
+
+        # Buttons
+        line2 = QFrame()
+        line2.setFrameShape(QFrame.Shape.HLine)
+        line2.setStyleSheet(f"color:{P['border']};")
+        vl.addWidget(line2)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        self.skip_btn = QPushButton("Skip for now")
+        self.skip_btn.setFixedHeight(34)
+        self.skip_btn.setStyleSheet(
+            f"QPushButton {{ background:{P['surface2']}; color:{P['text_dim']};"
+            f"border:1px solid {P['border']}; border-radius:5px; padding:0 16px; }}"
+            f"QPushButton:hover {{ border-color:{P['border']}; color:{P['text']}; }}"
+        )
+        self.skip_btn.clicked.connect(self.reject)
+        btn_row.addWidget(self.skip_btn)
+
+        self.ok_btn = QPushButton("✓  Let\'s Go!")
+        self.ok_btn.setFixedHeight(34)
+        self.ok_btn.setEnabled(False)
+        self.ok_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{P['accent']}; color:#1a1c23; border:none;
+                border-radius:5px; padding:0 24px; font-size:12px; font-weight:bold;
+            }}
+            QPushButton:hover    {{ background:#96c896; }}
+            QPushButton:disabled {{ background:{P['border']}; color:{P['text_dim']}; }}
+        """)
+        self.ok_btn.clicked.connect(self._accept)
+        btn_row.addWidget(self.ok_btn)
+        vl.addLayout(btn_row)
+
+        self.setStyleSheet(f"""
+            QDialog {{ background:{P['bg']}; color:{P['text']}; font-family:monospace; }}
+            QLabel  {{ color:{P['text']}; }}
+        """)
+
+    def _browse_mods(self):
+        path = QFileDialog.getExistingDirectory(
+            self, "Select your Mods folder", str(Path.home()))
+        if path:
+            self.mods_edit.setText(path)
+
+    def _browse_smapi(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select StardewModdingAPI executable", str(Path.home()))
+        if path:
+            self.smapi_edit.setText(path)
+
+    def _validate(self):
+        mods_ok  = bool(self.mods_edit.text().strip()  and Path(self.mods_edit.text().strip()).exists())
+        smapi_ok = bool(self.smapi_edit.text().strip() and Path(self.smapi_edit.text().strip()).exists())
+
+        if self.mods_edit.text().strip():
+            if mods_ok:
+                self.mods_status.setText("✓  Found!")
+                self.mods_status.setStyleSheet(f"color:{P['green']};")
+            else:
+                self.mods_status.setText("✗  Path not found")
+                self.mods_status.setStyleSheet(f"color:{P['red']};")
+        else:
+            self.mods_status.setText("")
+
+        if self.smapi_edit.text().strip():
+            if smapi_ok:
+                self.smapi_status.setText("✓  Found!")
+                self.smapi_status.setStyleSheet(f"color:{P['green']};")
+            else:
+                self.smapi_status.setText("✗  Path not found")
+                self.smapi_status.setStyleSheet(f"color:{P['red']};")
+        else:
+            self.smapi_status.setText("")
+
+        self.ok_btn.setEnabled(mods_ok and smapi_ok)
+
+    def _accept(self):
+        self.mods_dir   = self.mods_edit.text().strip()
+        self.smapi_path = self.smapi_edit.text().strip()
+        self.accept()
+
+
 # ─── Main Window ──────────────────────────────────────────────────────────────
 
 class SDVModManager(QMainWindow):
@@ -548,6 +819,9 @@ class SDVModManager(QMainWindow):
         self._build_ui()
         self._apply_theme()
         self.refresh_mods()
+        # Show first-launch setup dialog if neither path was found
+        if not self.mods_dir and not self.smapi_path:
+            self._show_first_launch()
 
     # ── Settings ──────────────────────────────────────────────────────────────
 
@@ -576,10 +850,21 @@ class SDVModManager(QMainWindow):
             self.settings.setValue("mods_dir", str(self.mods_dir))
         self.settings.setValue("smapi_path", self.smapi_path)
 
-    # ── UI construction ───────────────────────────────────────────────────────
+    def _show_first_launch(self):
+        dlg = FirstLaunchDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            if dlg.mods_dir and Path(dlg.mods_dir).exists():
+                self.mods_dir = Path(dlg.mods_dir)
+            if dlg.smapi_path and Path(dlg.smapi_path).exists():
+                self.smapi_path = dlg.smapi_path
+            self._save_settings()
+            self.refresh_mods()
+            self._update_path_labels()
+
+    # ── UI Construction ───────────────────────────────────────────────────────
 
     def _build_ui(self):
-        self.setWindowTitle(APP_NAME)
+        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
         self.setWindowIcon(make_icon())
         self.setMinimumSize(900, 640)
         self.resize(
@@ -619,7 +904,7 @@ class SDVModManager(QMainWindow):
         hl.addSpacing(8)
 
         title = QLabel(APP_NAME)
-        title.setFont(QFont("monospace", 16, QFont.Weight.Bold))
+        title.setFont(QFont("monospace", 15, QFont.Weight.Bold))
         title.setStyleSheet(f"color:{P['accent']}; letter-spacing:1px;")
         hl.addWidget(title)
 
@@ -629,6 +914,16 @@ class SDVModManager(QMainWindow):
         sub.setAlignment(Qt.AlignmentFlag.AlignBottom)
         hl.addWidget(sub)
         hl.addStretch()
+
+        # Platform badge
+        plat_lbl = QLabel(PLATFORM)
+        plat_lbl.setFont(QFont("monospace", 9))
+        plat_lbl.setStyleSheet(f"""
+            color:{P['blue']}; background:{P['surface2']};
+            border:1px solid {P['border']}; border-radius:8px; padding:2px 8px;
+        """)
+        hl.addWidget(plat_lbl)
+        hl.addSpacing(6)
 
         self.count_label = QLabel("0 mods")
         self.count_label.setFont(QFont("monospace", 10))
@@ -766,7 +1061,7 @@ class SDVModManager(QMainWindow):
         sl.setContentsMargins(6, 0, 0, 0)
         sl.setSpacing(10)
 
-        # Profiles group
+        # Profiles
         prof_box = QGroupBox("Profiles")
         pb_vl = QVBoxLayout(prof_box)
         pb_vl.setContentsMargins(8, 8, 8, 8)
@@ -846,7 +1141,7 @@ class SDVModManager(QMainWindow):
             }}
         """)
 
-    # ── Mod logic ─────────────────────────────────────────────────────────────
+    # ── Mod Logic ─────────────────────────────────────────────────────────────
 
     def refresh_mods(self):
         self.mods = get_mods(self.mods_dir) if self.mods_dir else []
@@ -865,7 +1160,6 @@ class SDVModManager(QMainWindow):
             card.deleteLater()
         self.mod_cards.clear()
 
-        # Remove old stretch
         if self.cards_layout.count():
             self.cards_layout.takeAt(self.cards_layout.count() - 1)
 
@@ -952,7 +1246,7 @@ class SDVModManager(QMainWindow):
         ok = bool(self.smapi_path and Path(self.smapi_path).exists())
         self.btn_launch.setEnabled(ok)
 
-    # ── Profiles logic ────────────────────────────────────────────────────────
+    # ── Profiles Logic ────────────────────────────────────────────────────────
 
     def _current_enabled_ids(self) -> list[str]:
         return [mod_id(m) for m in self.mods if m["enabled"]]
@@ -982,7 +1276,7 @@ class SDVModManager(QMainWindow):
             self.profiles_panel.refresh()
             self.status.showMessage(f"Saved profile: {name}")
         else:
-            # Apply profile: enable mods in list, disable the rest
+            # Apply profile: enable mods in list, disable everything else
             profile_ids = set(self.profiles.get(signal))
             for mod in self.mods:
                 want = mod_id(mod) in profile_ids
@@ -992,12 +1286,12 @@ class SDVModManager(QMainWindow):
                 card.refresh(card.mod)
             self.status.showMessage(f"Applied profile: {signal}")
 
-    # ── Paths dialog ──────────────────────────────────────────────────────────
+    # ── Paths Dialog ──────────────────────────────────────────────────────────
 
     def _show_paths_dialog(self):
         dlg = QDialog(self)
         dlg.setWindowTitle("Configure Paths")
-        dlg.setMinimumWidth(540)
+        dlg.setMinimumWidth(560)
         dlg.setStyleSheet(self.styleSheet())
         vl = QVBoxLayout(dlg)
         vl.setSpacing(12)
@@ -1062,14 +1356,12 @@ class SDVModManager(QMainWindow):
             nm = mods_edit.text().strip()
             ns = smapi_edit.text().strip()
             if nm and Path(nm).exists():
-                self.mods_dir = Path(nm)
-                changed = True
+                self.mods_dir = Path(nm); changed = True
             elif nm:
                 QMessageBox.warning(self, "Invalid",
                     f"Mods directory not found:\n{nm}")
             if ns and Path(ns).exists():
-                self.smapi_path = ns
-                changed = True
+                self.smapi_path = ns; changed = True
             elif ns:
                 QMessageBox.warning(self, "Invalid",
                     f"SMAPI executable not found:\n{ns}")
@@ -1086,9 +1378,7 @@ class SDVModManager(QMainWindow):
             return
         self.btn_launch.setEnabled(False)
         self.btn_launch.setText("▶  Launching…")
-        self.launch_thread = LaunchThread(
-            self.smapi_path, use_steam=bool(find_steam_executable())
-        )
+        self.launch_thread = LaunchThread(self.smapi_path)
         self.launch_thread.finished.connect(self._on_launched)
         self.launch_thread.error.connect(self._on_launch_error)
         self.launch_thread.start()
@@ -1104,7 +1394,7 @@ class SDVModManager(QMainWindow):
         self.btn_launch.setText("▶  Launch with SMAPI")
         self.btn_launch.setEnabled(True)
 
-    # ── Window events ─────────────────────────────────────────────────────────
+    # ── Window Events ─────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
         self.settings.setValue("width",  self.width())
@@ -1113,7 +1403,7 @@ class SDVModManager(QMainWindow):
         super().closeEvent(event)
 
 
-# ─── Entry point ──────────────────────────────────────────────────────────────
+# ─── Entry Point ──────────────────────────────────────────────────────────────
 
 def main():
     app = QApplication(sys.argv)
